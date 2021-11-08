@@ -39,6 +39,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
         uint256 lastRewardBlock;  // Last block number that MMproes distribution occurs.
         uint256 accMMproPerShare;   // Accumulated MMproes per share, times 1e18. See below.
         uint16 depositFeeBP;      // Deposit fee in basis points
+        uint256 depositLimit;
         uint256 extFarm; 
         IERC20 doubleToken;
         uint256 doublePerBlock;
@@ -93,16 +94,13 @@ contract MasterChef is Ownable, ReentrancyGuard {
         return poolInfo.length;
     }
 
-    mapping(IERC20 => bool) public poolExistence;
-    mapping(IERC20 => bool) public additionalPoolExistence;
-    modifier additionalNonDuplicated(IERC20 _token) {
-        require(additionalPoolExistence[_token] == false, "additionalNonDuplicated: duplicated");
+
+    mapping(IERC20 => bool) public tokenExistence;
+    modifier nonDuplicated(IERC20 _token) {
+        require(tokenExistence[_token] == false, "nonDuplicated: duplicated");
         _;
     }
-    modifier nonDuplicated(IERC20 _lpToken) {
-        require(poolExistence[_lpToken] == false, "nonDuplicated: duplicated");
-        _;
-    }
+
     uint256 private constant _NOT_EXT_FARM = 0;
     uint256 private constant _DOUBLE_FARM = 1;
     uint256 private constant _MULTI_FARM = 2;
@@ -112,17 +110,18 @@ contract MasterChef is Ownable, ReentrancyGuard {
     function add(uint256 _allocPoint, 
     IERC20 _lpToken, 
     uint16 _depositFeeBP,
+    uint256 _depositLimit,
     uint256 _extFarm,
     IERC20 _doubleToken,
     uint256 _doublePerBlock
-    ) external onlyOwner nonDuplicated(_lpToken) {
+    ) external onlyOwner {
         require(_depositFeeBP <= 10000, "add: invalid deposit fee basis points");
         if(_extFarm == _DOUBLE_FARM){
             require(address(_doubleToken)!=address(0),"zero doubleToken address");
         }
+        require(_depositLimit>0,"add: _depositLimit is zero");
         uint256 lastRewardBlock = block.number > startBlock ? block.number : startBlock;
         totalAllocPoint = totalAllocPoint.add(_allocPoint);
-        poolExistence[_lpToken] = true;
 
         poolInfo.push(PoolInfo({
             lpToken: _lpToken,
@@ -130,6 +129,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
             lastRewardBlock: lastRewardBlock,
             accMMproPerShare: 0,
             depositFeeBP: _depositFeeBP,
+            depositLimit: _depositLimit,
             extFarm: _extFarm,
             doubleToken:_doubleToken,
             doublePerBlock:_doublePerBlock,
@@ -139,12 +139,18 @@ contract MasterChef is Ownable, ReentrancyGuard {
 
     // Update the given pool's MMpro allocation point and deposit fee. Can only be called by the owner.
     function set(uint256 _pid, uint256 _allocPoint, 
-    uint16 _depositFeeBP, uint256 _doublePerBlock) external onlyOwner {
+    uint16 _depositFeeBP, uint256 _doublePerBlock,uint256 _depositLimit) external onlyOwner {
         require(_depositFeeBP <= 10000, "set: invalid deposit fee basis points");
-        totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(_allocPoint);
-        poolInfo[_pid].allocPoint = _allocPoint;
-        poolInfo[_pid].depositFeeBP = _depositFeeBP;
-        poolInfo[_pid].doublePerBlock = _doublePerBlock;
+        PoolInfo storage pool = poolInfo[_pid];
+        require(
+            _depositLimit>=pool.depositLimit 
+            || pool.lpToken.balanceOf(address(this))==0, 
+            "set: invalid depositLimit");
+        totalAllocPoint = totalAllocPoint.sub(pool.allocPoint).add(_allocPoint);
+        pool.allocPoint = _allocPoint;
+        pool.depositFeeBP = _depositFeeBP;
+        pool.doublePerBlock = _doublePerBlock;
+        pool.depositLimit = _depositLimit;
     }
 
     // Return reward multiplier over the given _from to _to block.
@@ -228,9 +234,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
         updatePool(_pid);
-        if (_amount > 0 && address(referral) != address(0) && _referrer != address(0) && _referrer != msg.sender) {
-            referral.recordReferral(msg.sender, _referrer);
-        }
+        
         if (user.amount > 0) {
             uint256 pending = user.amount.mul(pool.accMMproPerShare).div(1e18).sub(user.rewardDebt);
             if (pending > 0) {
@@ -259,6 +263,13 @@ contract MasterChef is Ownable, ReentrancyGuard {
             }
         }
         if (_amount > 0) {
+            if (address(referral) != address(0) 
+                && _referrer != address(0) 
+                && _referrer != msg.sender) {
+                    referral.recordReferral(msg.sender, _referrer);
+            }
+            pool.depositLimit=pool.depositLimit.sub(_amount,
+            "the total amount of the deposit for this pool has been exceeded");
             pool.lpToken.safeTransferFrom(address(msg.sender), address(this), _amount);
             if (pool.depositFeeBP > 0) {
                 uint256 depositFee = _amount.mul(pool.depositFeeBP).div(10000);
@@ -311,6 +322,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
             
         }
         if (_amount > 0) {
+            pool.depositLimit=pool.depositLimit.add(_amount);
             user.amount = user.amount.sub(_amount);
             pool.lpToken.safeTransfer(address(msg.sender), _amount);
         }
@@ -335,6 +347,8 @@ contract MasterChef is Ownable, ReentrancyGuard {
         user.amount = 0;
         user.rewardDebt = 0;
         user.rewardDoubleDebt = 0;
+        pool.depositLimit=pool.depositLimit.add(amount);
+
         if (pool.extFarm == _MULTI_FARM) {
             uint256 additionPoolsLength = additionalPoolInfo.length;
             for (uint256 aid = 0; aid < additionPoolsLength; ++aid) {
@@ -424,14 +438,14 @@ contract MasterChef is Ownable, ReentrancyGuard {
         startBlock = _startBlock;
     }
     
-    function addMultiFarmToken(IERC20 _token, uint256 _tokenPerBlock) public additionalNonDuplicated(_token) onlyOwner {
+    function addMultiFarmToken(IERC20 _token, uint256 _tokenPerBlock) public nonDuplicated(_token) onlyOwner {
         require(additionalPoolInfo.length<=_MAX_ADDITIONAL_LENGTH,"tokens too much");
         additionalPoolInfo.push(AdditionalPoolInfo({
               token: _token,
               tokenPerBlock: _tokenPerBlock,
               perShare: 0
         }));
-        additionalPoolExistence[_token] = true;
+        tokenExistence[_token] = true;
     }
     
     function setMultiFarm(uint256 _pid, uint256 _tokenPerBlock) public onlyOwner {
