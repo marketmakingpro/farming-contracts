@@ -7,7 +7,6 @@ import "./lib/SafeMath.sol";
 import "./lib/IERC20.sol";
 import "./lib/SafeERC20.sol";
 import "./lib/ReentrancyGuard.sol";
-import "./MMPROtoken.sol";
 import "./IReferral.sol";
 
 
@@ -48,7 +47,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
     }
 
     // The MMpro TOKEN!
-    MMPROtoken public MMpro;
+    IERC20 public MMpro;
     address public feeAddress;
 
     // MMpro tokens created per block.
@@ -81,7 +80,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
     event ReferralCommissionPaid(address indexed user, address indexed referrer, uint256 commissionAmount);
 
     constructor(
-        MMPROtoken _MMpro,
+        IERC20 _MMpro,
         uint256 _startBlock,
         address _feeAddress
     ) public {
@@ -115,7 +114,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
     IERC20 _doubleToken,
     uint256 _doublePerBlock
     ) external onlyOwner {
-        require(_depositFeeBP <= 10000, "add: invalid deposit fee basis points");
+        require(_depositFeeBP <= 1000, "add: invalid deposit fee basis points");
         if(_extFarm == _DOUBLE_FARM){
             require(address(_doubleToken)!=address(0),"zero doubleToken address");
         }
@@ -140,7 +139,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
     // Update the given pool's MMpro allocation point and deposit fee. Can only be called by the owner.
     function set(uint256 _pid, uint256 _allocPoint, 
     uint16 _depositFeeBP, uint256 _doublePerBlock,uint256 _depositLimit) external onlyOwner {
-        require(_depositFeeBP <= 10000, "set: invalid deposit fee basis points");
+        require(_depositFeeBP <= 1000, "set: invalid deposit fee basis points");
         PoolInfo storage pool = poolInfo[_pid];
         require(
             _depositLimit>=pool.depositLimit 
@@ -207,7 +206,6 @@ contract MasterChef is Ownable, ReentrancyGuard {
         }
         uint256 multiplier = getMultiplier(pool.lastRewardBlock, block.number);
         uint256 MMproReward = multiplier.mul(MMproPerBlock).mul(pool.allocPoint).div(totalAllocPoint);
-        MMpro.mint(address(this), MMproReward);
         pool.accMMproPerShare = pool.accMMproPerShare.add(MMproReward.mul(1e18).div(lpSupply));
         
         if(pool.extFarm == _DOUBLE_FARM)
@@ -410,7 +408,7 @@ contract MasterChef is Ownable, ReentrancyGuard {
             uint256 commissionAmount = _pending.mul(referralCommissionRate).div(10000);
 
             if (referrer != address(0) && commissionAmount > 0) {
-                MMpro.mint(referrer, commissionAmount);
+                safeMMproTransfer(referrer, commissionAmount);
                 emit ReferralCommissionPaid(_user, referrer, commissionAmount);
             }
         }
